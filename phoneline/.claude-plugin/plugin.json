@@ -1,0 +1,21 @@
+{
+  "name": "phoneline",
+  "version": "0.1.0",
+  "description": "Web pages run on your own Claude through your Phone Line room. You approve each site once; anything that acts asks you first, on your phone or the notch. /phoneline:setup to start.",
+  "author": {
+    "name": "sameeeeeeep"
+  },
+  "homepage": "https://github.com/sameeeeeeep/phoneline",
+  "license": "MIT",
+  "keywords": [
+    "phone line",
+    "web pages",
+    "your claude",
+    "consent",
+    "notch"
+  ],
+  "dependencies": [
+    "ask-notch"
+  ],
+  "repository": "https://github.com/sameeeeeeep/phoneline"
+}

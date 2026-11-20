@@ -1,0 +1,47 @@
+{
+  "about": "The only tools the Coco runner lets claude -p use: exact names, each one checked to only read. Anything not listed is refused, including tools a connector adds later. Owners add their own in ~/.config/coco-runner/read-only-tools.json {\"add\": [\"mcp__server__tool\"]} (node runner.mjs --allow-tool <name>). Reviewed by test/byo-runner-unit.test.mjs: no name on this list may hold an acting verb.",
+  "builtin": [
+    "StructuredOutput",
+    "ToolSearch",
+    "Read",
+    "Grep",
+    "Glob",
+    "LS"
+  ],
+  "web": [
+    "WebSearch",
+    "WebFetch"
+  ],
+  "mcp": [
+    "mcp__mail-inbox__get_message",
+    "mcp__mail-inbox__list_recent",
+    "mcp__mail-inbox__search",
+    "mcp__mail-inbox__unread_since",
+    "mcp__whatsapp__list_chats",
+    "mcp__whatsapp__read_chat",
+    "mcp__whatsapp__recent_messages",
+    "mcp__whatsapp__search_chats",
+    "mcp__whatsapp__search_messages",
+    "mcp__whatsapp__unread",
+    "mcp__granola__query_granola_meetings",
+    "mcp__granola__get_meetings",
+    "mcp__granola__search_meetings",
+    "mcp__granola__get_meeting_transcript",
+    "mcp__granola__search_transcripts",
+    "mcp__granola__list_meeting_folders",
+    "mcp__claude_ai_Gmail__search_threads",
+    "mcp__claude_ai_Gmail__get_thread",
+    "mcp__claude_ai_Gmail__get_message",
+    "mcp__claude_ai_Gmail__list_labels",
+    "mcp__claude_ai_Google_Drive__search_files",
+    "mcp__claude_ai_Google_Drive__read_file_content",
+    "mcp__claude_ai_Google_Drive__get_file_metadata",
+    "mcp__claude_ai_Google_Drive__list_recent_files",
+    "mcp__claude_ai_Google_Calendar__list_events",
+    "mcp__claude_ai_Google_Calendar__get_event",
+    "mcp__claude_ai_Google_Calendar__list_calendars",
+    "mcp__claude_ai_Granola__query_granola_meetings",
+    "mcp__claude_ai_Granola__get_meetings",
+    "mcp__claude_ai_Granola__search_meetings"
+  ]
+}

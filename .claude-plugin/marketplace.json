@@ -1,0 +1,22 @@
+{
+  "name": "phoneline",
+  "description": "Phone Line: let web pages run on your own Claude, with you in charge.",
+  "owner": {
+    "name": "sameeeeeeep"
+  },
+  "plugins": [
+    {
+      "name": "phoneline",
+      "source": "./phoneline",
+      "description": "Web pages run on your own Claude through your Phone Line room. You approve each site once; anything that acts asks you first, on your phone or the notch. /phoneline:setup to start."
+    },
+    {
+      "name": "ask-notch",
+      "source": {
+        "source": "github",
+        "repo": "sameeeeeeep/ask-notch"
+      },
+      "description": "Claude's questions drop from your Mac's notch as a card. Phone Line uses it to ask before a web page's job acts."
+    }
+  ]
+}
