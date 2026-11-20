@@ -1,6 +1,6 @@
 {
   "name": "phoneline",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Web pages run on your own Claude through your Phone Line room. You approve each site once; anything that acts asks you first, on your phone or the notch. /phoneline:setup to start.",
   "author": {
     "name": "sameeeeeeep"

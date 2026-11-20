@@ -27,6 +27,7 @@ You need Claude Code installed and signed in, Node 18 or later, and macOS for th
 - A web page adds one script (`https://line.sameep.ai/kit.js`) and asks to join your room. You approve it once by its code, in your room page or on your phone.
 - The page sends jobs, and each job names its app. Your runner decides what that app may use:
   - An app you haven't set up runs on the model only: no files, no shell, no connectors.
+  - **Project access, not all access:** `--folder ~/Documents/Projects/site` lets one app read inside one folder. It is read only, it can never be your home folder or a credentials folder, and other apps still read no files.
   - Tools that only read can be allowed per app.
   - Tools that act (send, write, pay, delete) **ask you first, every time**: a card on your notch (Ask Notch) and in your room, with a 6-digit code the page also shows.
   - Optionally, an app's every job waits for your tap first.
@@ -41,7 +42,7 @@ The phone is optional. Add your room to its Home Screen if you want taps and not
 |---|---|
 | `/phoneline:setup` | Make your room (or reuse it), start the runner, open the claim page |
 | `/phoneline:status` | Your room, its owner, the runner, your apps |
-| `/phoneline:apps` | See or change what each app may do: `allow <app> --origin <site> [--tool t] [--act t] [--approve-jobs \| --auto]`, `deny <app>` |
+| `/phoneline:apps` | See or change what each app may do: `allow <app> --origin <site> [--folder <project>] [--tool t] [--act t] [--approve-jobs \| --auto]`, `deny <app>` |
 | `/phoneline:uninstall` | Stop the runner (`forget` also deletes this Mac's room login) |
 
 ## For page authors
