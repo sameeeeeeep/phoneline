@@ -192,10 +192,29 @@ async function uninstall() {
   say(`✓ The runner is stopped${argv.includes('--forget') ? ' and this Mac\'s room login is deleted (the room stays; its owner can remove this runner from it)' : ''}.`);
 }
 
+// dial <number> <pin> [--yes]: connect a web page that shows "Call this page: 482 913 7720 · PIN K7Q2" to this Mac's
+// Claude. Without --yes it only says which page that is, for the person to OK. Uses this Mac's runner login.
+async function dial() {
+  const pair = read(PAIRING); if (!pair) fail('no room on this Mac yet. Run: setup');
+  const pos = argv.filter((a, i) => !a.startsWith('--') && !(i > 0 && argv[i - 1] === '--pin'));
+  const pin = opt('pin') ?? pos.at(-1);
+  const number = pos.length > 1 ? pos.slice(0, -1).join(' ') : pos[0];
+  if (!number || !pin || pos.length < 2 && !opt('pin')) fail('usage: dial <number> <pin> [--yes]   e.g. dial 482 913 7720 K7Q2');
+  const relay = (pair.relay || RELAY).replace(/\/+$/, '');
+  const r = await fetch(`${relay}/r/${pair.room}/dial`, { method: 'POST', headers: { authorization: `Bearer ${pair.token}`, 'content-type': 'application/json' }, body: JSON.stringify({ number, pin, connect: argv.includes('--yes') }) })
+    .then(async (x) => ({ status: x.status, data: await x.json().catch(() => ({})) }), () => ({ status: 0, data: { message: `could not reach ${relay}` } }));
+  if (r.status !== 200) fail(String(r.data.message || `the relay said ${r.status}`).replace(/^\w+: /, ''));
+  const p = r.data.page, host = new URL(p.origin).host;
+  if (!r.data.connected) {
+    say(`${r.data.number} is ${p.name} at ${p.origin}${p.app ? ` (app "${p.app}")` : ''}. Its number runs out in ${Math.ceil(p.expires_in_s / 60)} min.`);
+    say(`Ask: "Connect ${p.name} (${host}) to your Claude?" Then, only on a yes: dial ${number} ${pin} --yes`);
+  } else say(`✓ Connected: ${p.name} (${host}) runs on your Claude now, with only the tools its app has. Anything that acts still asks you. Hang it up from your room: ${relay}/r/${pair.room}`);
+}
+
 const cmd = process.argv[2] || 'setup';
 argv.shift();
-const run = { setup, claim, status, apps, uninstall }[cmd];
+const run = { setup, claim, status, apps, uninstall, dial }[cmd];
 if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
-  if (!run) fail(`unknown command "${cmd}". Try: setup, claim, status, apps, uninstall`);
+  if (!run) fail(`unknown command "${cmd}". Try: setup, claim, status, apps, uninstall, dial`);
   await run();
 }

@@ -1067,6 +1067,8 @@ async function kitServe(s, { model }) {
       let body = null; try { body = JSON.parse(p.got.join('')); } catch { /* below */ }
       if (!body || typeof body !== 'object') { await finish(job, { ok: false, error: 'the job did not parse', code: 'bad_job' }); continue; }
       job.app = String(body.app || ''); job.body = body;
+      // A page let in by number is bound to the app its owner said yes to (the relay keeps it on the member).
+      if (from.app && job.app !== from.app) { await finish(job, { ok: false, error: `this page was let in for "${from.app}", not "${job.app}"`, code: 'wrong_app' }); continue; }
       if (queue.length >= KIT.queueMax || queue.filter((j) => j.from === job.from).length >= KIT.perSender) { await finish(job, { ok: false, error: 'this Claude is busy; try again in a minute', code: 'busy' }); continue; }
       queue.push(job);
       if (running || queue.length > 1) { ev(job, { kind: 'queued', ahead: queue.length - 1 + (running ? 1 : 0) }); log(job, 'queued'); }

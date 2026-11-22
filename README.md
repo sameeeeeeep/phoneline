@@ -41,6 +41,7 @@ The phone is optional. Add your room to its Home Screen if you want taps and not
 | Command | What it does |
 |---|---|
 | `/phoneline:setup` | Make your room (or reuse it), start the runner, open the claim page |
+| `/phoneline:dial <number> <pin>` | Connect a web page that shows "Call this page: 482 913 7720 · PIN K7Q2". Claude names the page and its address and connects only after you say yes |
 | `/phoneline:status` | Your room, its owner, the runner, your apps |
 | `/phoneline:apps` | See or change what each app may do: `allow <app> --origin <site> [--folder <project>] [--tool t] [--act t] [--approve-jobs \| --auto]`, `deny <app>` |
 | `/phoneline:uninstall` | Stop the runner (`forget` also deletes this Mac's room login) |
