@@ -16,7 +16,7 @@ In Claude Code:
 
 `/phoneline:setup` does the rest:
 
-1. **Makes your room** on Phone Line (line.sameep.ai), with this Mac already in it.
+1. **Makes your room** on Phone Line (phoneline.dev), with this Mac already in it.
 2. **Starts the runner**, a small background program with no dependencies, as a login service. It starts when you log in and restarts if it stops.
 3. **Opens the claim page.** It shows a 6-digit code. Claim the room only if your terminal shows the same code, and it's yours.
 
@@ -24,7 +24,7 @@ You need Claude Code installed and signed in, Node 18 or later, and macOS for th
 
 ## How it works
 
-- A web page adds one script (`https://line.sameep.ai/kit.js`) and asks to join your room. You approve it once by its code, in your room page or on your phone.
+- A web page adds one script (`https://phoneline.dev/kit.js`) and asks to join your room. You approve it once by its code, in your room page or on your phone.
 - The page sends jobs, and each job names its app. Your runner decides what that app may use:
   - An app you haven't set up runs on the model only: no files, no shell, no connectors.
   - **Project access, not all access:** `--folder ~/Documents/Projects/site` lets one app read inside one folder. It is read only, it can never be your home folder or a credentials folder, and other apps still read no files.
@@ -49,7 +49,7 @@ The phone is optional. Add your room to its Home Screen if you want taps and not
 ## For page authors
 
 ```html
-<script src="https://line.sameep.ai/kit.js"></script>
+<script src="https://phoneline.dev/kit.js"></script>
 <script>
   const line = new PhoneLine({ room: "<the visitor's room>", name: "My app" });
   await line.connect({ onCode: (code) => showCode(code) });   // first visit: the visitor approves this code

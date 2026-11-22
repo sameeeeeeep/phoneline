@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // byo-runner.mjs: Coco's thinking on YOUR Claude. One file, no dependencies, Node 18+.
 //
-// It joins your Coco workspace's Phone Line room (line.sameep.ai) with a one-time pairing link, then, for each request
+// It joins your Coco workspace's Phone Line room (phoneline.dev) with a one-time pairing link, then, for each request
 // Coco posts there, runs headless Claude Code (`claude -p`) on this machine: your own Claude login, your own MCP
 // connectors (Gmail, Calendar, ...), your CLAUDE.md and the folder you start it in. It streams the answer back over the
 // room. Coco never gets your keys; this runner never gets Coco's.
@@ -299,7 +299,10 @@ function allowTool(name) {
 }
 const stateFile = () => join(HOME, 'pairing.json');
 function saveState(s) { mkdirSync(HOME, { recursive: true, mode: 0o700 }); writeFileSync(stateFile(), JSON.stringify(s), { mode: 0o600 }); chmodSync(stateFile(), 0o600); }
-function loadState() { try { return JSON.parse(readFileSync(stateFile(), 'utf8')); } catch { return null; } }
+// line.sameep.ai is retired for phoneline.dev on 23 Dec 2026 (the same relay, rooms and tokens): a saved pairing moves
+export const RELAY_MOVED = { 'https://line.sameep.ai': 'https://phoneline.dev' };
+export const movedRelay = (st) => (st && RELAY_MOVED[String(st.relay).replace(/\/+$/, '')] ? { ...st, relay: RELAY_MOVED[String(st.relay).replace(/\/+$/, '')] } : st);
+function loadState() { try { return movedRelay(JSON.parse(readFileSync(stateFile(), 'utf8'))); } catch { return null; } }
 
 async function pair(link) {
   const page = await http(link);
@@ -782,7 +785,7 @@ async function doMain(verb, argv) {
 }
 
 // ---- Phone Line kit: jobs from any web page, in the owner's own room ------------------------------------------------
-// A web page loads https://line.sameep.ai/kit.js, asks to join the owner's Phone Line room (the owner approves its
+// A web page loads https://phoneline.dev/kit.js, asks to join the owner's Phone Line room (the owner approves its
 // pairing code), and sends jobs: "PL-JOB v1 {ref, part, parts, body}" with body {app, prompt, system?, tools?, schema?,
 // timeout_s?}, privately to this runner. The relay binds a page's member to its origin and sandboxes it (it sees only its
 // own messages and the answers sent to it; it can only send to a member that serves). This runner:
@@ -924,7 +927,7 @@ function openCard(card, spec) {
   return { result, close: () => { try { child.kill('SIGTERM'); } catch { /* gone */ } } };
 }
 const kitStateFile = () => join(HOME, 'kit-pairing.json');
-function loadKitState() { try { return JSON.parse(readFileSync(kitStateFile(), 'utf8')); } catch { return null; } }
+function loadKitState() { try { const st = movedRelay(JSON.parse(readFileSync(kitStateFile(), 'utf8'))); return st; } catch { return null; } }
 function saveKitState(st) { mkdirSync(HOME, { recursive: true, mode: 0o700 }); writeFileSync(kitStateFile(), JSON.stringify(st), { mode: 0o600 }); chmodSync(kitStateFile(), 0o600); }
 export function kitRelay(u) {
   try { const x = new URL(String(u)); const local = ['localhost', '127.0.0.1'].includes(x.hostname); return x.protocol === 'https:' || (local && x.protocol === 'http:') ? x.origin : null; } catch { return null; }
@@ -1489,10 +1492,10 @@ async function kitMain(argv) {
   if (argv[0] === 'forget') { rmSync(kitStateFile(), { force: true }); say('kit pairing forgotten'); return; }
   let s = loadKitState();
   if (!s || opt('room')) {
-    const relay = kitRelay(opt('relay') || 'https://line.sameep.ai');
+    const relay = kitRelay(opt('relay') || 'https://phoneline.dev');
     const room = String(opt('room') || '');
     if (!relay) throw new Error('--relay must be https (or http://localhost for tests)');
-    if (!/^[a-z0-9][a-z0-9-]{2,39}$/.test(room)) throw new Error('first run: node runner.mjs kit --room <your Phone Line room> [--invite pl_…] [--relay https://line.sameep.ai]');
+    if (!/^[a-z0-9][a-z0-9-]{2,39}$/.test(room)) throw new Error('first run: node runner.mjs kit --room <your Phone Line room> [--invite pl_…] [--relay https://phoneline.dev]');
     s = await kitPair({ relay, room, invite: opt('invite'), name: opt('name') || `Claude Code on ${hostname().replace(/\.local$/, '')}` });
   }
   for (const sig of ['SIGINT', 'SIGTERM']) process.on(sig, async () => { say('stopping'); logLine({ ev: 'kit-stop' }); await http(`${s.relay}/r/${s.room}/serve`, { method: 'POST', token: s.token, json: { on: false }, timeoutMs: 5000 }).catch(() => {}); process.exit(0); });

@@ -15,7 +15,7 @@
 //   4. Opens the claim link in your browser. It shows a 6-digit code; claim the room only if your terminal shows the
 //      same one. Then add the room to your phone (the claim page says how) for notifications and taps on the go.
 //
-// Env: PHONELINE_RELAY (default https://line.sameep.ai), PHONELINE_HOME (default ~/.phoneline), PHONELINE_NO_OPEN=1.
+// Env: PHONELINE_RELAY (default https://phoneline.dev), PHONELINE_HOME (default ~/.phoneline), PHONELINE_NO_OPEN=1.
 // Flags for setup: --no-service (don't install the login service; run `node ~/.phoneline/runner.mjs kit` yourself),
 // --no-open, --wait <seconds> (how long to wait for the claim, default 120), --name "<runner name>".
 import { spawnSync, execSync } from 'node:child_process';
@@ -24,10 +24,17 @@ import { homedir, hostname, platform } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-const RELAY = (process.env.PHONELINE_RELAY || 'https://line.sameep.ai').replace(/\/+$/, '');
+const RELAY = (process.env.PHONELINE_RELAY || 'https://phoneline.dev').replace(/\/+$/, '');
 const DIR = process.env.PHONELINE_HOME || join(homedir(), '.phoneline');
 const RUNNER = join(DIR, 'runner.mjs');
 const PAIRING = join(DIR, 'kit-pairing.json');
+// line.sameep.ai is retired for phoneline.dev (the same relay, rooms and tokens): a Mac set up with it moves on its own
+const OLD_RELAYS = ['https://line.sameep.ai', 'https://cos-relay.sameep-fd6.workers.dev'];
+function readPair() {
+  const p = read(PAIRING);
+  if (p && OLD_RELAYS.includes(String(p.relay).replace(/\/+$/, '')) && RELAY === 'https://phoneline.dev') { p.relay = RELAY; try { writeFileSync(PAIRING, JSON.stringify(p), { mode: 0o600 }); } catch { /* read-only: still use the new address */ } }
+  return p;
+}
 const CLAIM = join(DIR, 'claim.json');
 const LOG = join(DIR, 'runner.log');
 const LABEL = 'ai.sameep.phoneline';
@@ -115,7 +122,7 @@ async function setup() {
   if (!claude) fail('Claude Code is not installed on this Mac (no `claude` found). Install it and sign in first.');
   mkdirSync(DIR, { recursive: true, mode: 0o700 });
   for (const f of ['runner.mjs', 'read-only-tools.json']) copyFileSync(join(HERE, f), join(DIR, f));
-  let pair = read(PAIRING);
+  let pair = readPair();
   if (pair && pair.relay !== RELAY) fail(`this Mac is set up with ${pair.relay}; run uninstall --forget first to switch to ${RELAY}`);
   if (pair) {
     const o = await owner(pair);
@@ -154,7 +161,7 @@ async function setup() {
 }
 
 async function claim() {
-  const pair = read(PAIRING); if (!pair) fail('no room on this Mac yet. Run: setup');
+  const pair = readPair(); if (!pair) fail('no room on this Mac yet. Run: setup');
   const o = await owner(pair);
   if (o.owner) return say(`✓ ${pair.room} is already claimed by ${o.owner.name}.`);
   const c = read(CLAIM);
@@ -163,7 +170,7 @@ async function claim() {
 }
 
 async function status() {
-  const pair = read(PAIRING);
+  const pair = readPair();
   if (!pair) return say('No Phone Line room on this Mac. Run: setup');
   const o = await owner(pair);
   say(`Room: ${pair.room} on ${pair.relay}${o.revoked ? ' (this runner was removed from it)' : o.owner ? `, owned by ${o.owner.name}` : ', not claimed yet (phoneline claim)'}`);
@@ -186,7 +193,7 @@ function apps() {
 
 async function uninstall() {
   if (platform() === 'darwin') { spawnSync('launchctl', ['bootout', `gui/${process.getuid()}/${LABEL}`], { stdio: 'ignore' }); rmSync(PLIST, { force: true }); }
-  const pair = read(PAIRING);
+  const pair = readPair();
   if (pair) await api(`/r/${pair.room}/serve`, { method: 'POST', token: pair.token, json: { on: false } }).catch(() => null);
   if (argv.includes('--forget')) rmSync(DIR, { recursive: true, force: true });
   say(`✓ The runner is stopped${argv.includes('--forget') ? ' and this Mac\'s room login is deleted (the room stays; its owner can remove this runner from it)' : ''}.`);
@@ -195,7 +202,7 @@ async function uninstall() {
 // dial <number> <pin> [--yes]: connect a web page that shows "Call this page: 482 913 7720 · PIN K7Q2" to this Mac's
 // Claude. Without --yes it only says which page that is, for the person to OK. Uses this Mac's runner login.
 async function dial() {
-  const pair = read(PAIRING); if (!pair) fail('no room on this Mac yet. Run: setup');
+  const pair = readPair(); if (!pair) fail('no room on this Mac yet. Run: setup');
   const pos = argv.filter((a, i) => !a.startsWith('--') && !(i > 0 && argv[i - 1] === '--pin'));
   const pin = opt('pin') ?? pos.at(-1);
   const number = pos.length > 1 ? pos.slice(0, -1).join(' ') : pos[0];
