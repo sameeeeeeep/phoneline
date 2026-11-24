@@ -857,6 +857,37 @@ export function kitPolicy(cfg, app, origin, asked) {
 // what claude -p starts with as allowed: the app's reads only. Acts are NOT on it, so the hook's explicit allow (after the
 // owner's tap) is the only way one runs; if the hook fails, claude -p (which cannot prompt) refuses it.
 export const kitAllowed = (pol) => [...new Set([...KIT_BUILTIN, ...(pol.tools || [])])];
+// Pure: a tool's name as a person reads it ("Search the web", "ads library search with Meta")
+export const kitToolLabel = (t) => ({ WebSearch: 'Search the web', WebFetch: 'Read web pages', Read: 'Read files', Grep: 'Search files', Glob: 'List files', LS: 'List files' })[t] || kitDescribe(t, {}).action;
+// Pure: the tools a published job names that this job can't use now, and what each is:
+//   read: on the reviewed read-only list (an owner's one tap lets the app use it freely);
+//   act: anything else (allowed, it still asks the owner on every call); files: needs a folder (set up on the Mac);
+//   never: refused for every web page
+export function kitNeeds(wanted, pol, allow = loadAllow()) {
+  const out = [];
+  for (const t of kitStrs(wanted)) {
+    if (KIT_BUILTIN.includes(t)) continue;
+    const isWeb = allow.web.has(t);
+    if ((pol.acts || []).includes(t) || ((pol.tools || []).includes(t) && (!isWeb || pol.web) && (!FILE_TOOLS.has(t) || pol.files))) continue;
+    // only a connector's tool can be an act; any other built-in tool a web page names is never allowed
+    const kind = NEVER.includes(t) ? 'never' : FILE_TOOLS.has(t) ? 'files' : isWeb || (t.startsWith('mcp__') && allow.mcp.has(t)) ? 'read' : t.startsWith('mcp__') && NAME_RE.test(t) ? 'act' : 'never';
+    out.push({ tool: t, label: kitToolLabel(t), kind });
+  }
+  return out;
+}
+// Pure: kit-apps.json after the owner allowed `grant` for `app` from `origin`. A new app is tied to that site; an app
+// already open to any site stays so. Reads join `tools` (web reads turn web on), the rest join `acts` (they still ask).
+export function kitGrantCfg(raw, app, origin, grant) {
+  const r = JSON.parse(JSON.stringify(raw || {}));
+  r.apps = r.apps && typeof r.apps === 'object' ? r.apps : {};
+  const cur = Object.prototype.hasOwnProperty.call(r.apps, app) ? r.apps[app] : null;
+  const reads = grant.filter((n) => n.kind === 'read').map((n) => n.tool), acts = grant.filter((n) => n.kind === 'act').map((n) => n.tool);
+  const web = reads.some((t) => t === 'WebSearch' || t === 'WebFetch');
+  const origins = cur ? (kitStrs(cur.origins).length ? [...new Set([...kitStrs(cur.origins), origin])] : kitStrs(cur.origins)) : [origin];
+  r.apps[app] = { ...(cur || {}), tools: [...new Set([...kitStrs(cur?.tools), ...reads])], acts: [...new Set([...kitStrs(cur?.acts), ...acts])], ...(web || cur?.web ? { web: true } : {}), origins, granted: new Date().toISOString() };
+  if (!r.apps[app].origins.length) delete r.apps[app].origins;
+  return r;
+}
 // the most of a tool's input a consent card shows; an act whose input is longer is refused without asking, since the
 // owner could not see all of what they would allow
 export const KIT_SHOW = { room: 2400, notch: 500 };
@@ -977,8 +1008,10 @@ async function kitServe(s, { model }) {
   for (const f of readdirSync(consentDir())) try { rmSync(join(consentDir(), f), { force: true }); } catch { /* gone */ }
   const queue = [], parts = new Map(), done = new Set(), asks = new Map();
   let running = null;
-  const ev = (job, o) => post(s, `${KIT_TAGS.event} ${JSON.stringify({ ref: job.ref, ...o })}`, 'status', `${job.ref}:e:${++job.n}`, job.from).catch(() => {});
+  // one job's events go out one after another, and its answer after them, so the page sees them in order
+  const ev = (job, o) => { const n = ++job.n; job.evq = (job.evq || Promise.resolve()).then(() => post(s, `${KIT_TAGS.event} ${JSON.stringify({ ref: job.ref, ...o })}`, 'status', `${job.ref}:e:${n}`, job.from)).catch(() => {}); return job.evq; };
   const finish = async (job, out) => {
+    await job.evq;
     // if a part can't be sent, the page still gets an answer: a short failure, so it doesn't wait out its timer
     try { for (const [i, text] of split(KIT_TAGS.done, job.ref, out).entries()) await post(s, text, 'done', `${job.ref}:d:${i}`, job.from); }
     catch (e) {
@@ -993,11 +1026,12 @@ async function kitServe(s, { model }) {
     const a = asks.get(cid);
     if (!a) return;
     asks.delete(cid); clearTimeout(a.timer); a.notch?.close();
+    if (a.job.consents) a.job.consents[allow ? 'allowed' : 'denied']++;
     if (a.file) try { writeFileSync(join(consentDir(), `${cid}.answer`), JSON.stringify({ allow: !!allow, by }), { mode: 0o600 }); } catch { /* the hook timed out */ }
     say(`kit ${a.job.ref}: ${a.tool} ${allow ? 'ALLOWED' : 'denied'} by ${by}`);
     logLine({ ev: 'kit-consent', ref: a.job.ref, app: a.job.app, origin: a.job.origin, tool: a.tool, allow: !!allow, by });
     post(s, `${KIT_TAGS.asked} ${JSON.stringify({ cid, allow: !!allow, by })}`, 'status', `${cid}:asked`, null, true).catch(() => {});
-    ev(a.job, { kind: 'consent', tool: a.tool, state: allow ? 'allowed' : 'denied', code: a.code });
+    ev(a.job, { kind: 'consent', tool: a.tool, state: allow ? 'allowed' : 'denied', code: a.code, what: a.what });
     log(a.job, allow ? 'allowed' : 'denied', { tool: a.tool, what: a.what, by });
     a.resolve(!!allow);
   };
@@ -1005,12 +1039,13 @@ async function kitServe(s, { model }) {
   // Ask the owner, in the room (phone) and on the notch, with a 6-digit match code the page shows too (the kit puts up a
   // bar), so the owner can see the card belongs to the page in front of them. The first answer counts; none is a no.
   //   what: { action, fields }; full: the whole text the owner is allowing (the notch offers Allow only if it all fits)
-  const raise = (job, { tool, what, full, file = false, cid = `c${randomBytes(8).toString('hex')}` }) => new Promise((resolve) => {
+  const raise = (job, { tool, what, full, file = false, grant = false, cid = `c${randomBytes(8).toString('hex')}` }) => new Promise((resolve) => {
+    job.consents = job.consents || { asked: 0, allowed: 0, denied: 0 }; job.consents.asked++;
     const a = { job, tool, what: what.action, file, resolve, code: kitCode(), timer: setTimeout(() => answer(cid, false, 'no answer in time'), KIT.consentMs) };
     job.child?.extend?.(KIT.consentMs + 15_000); // waiting for the owner does not count against the job's time
     asks.set(cid, a);
     say(`kit ${job.ref}: ${job.app} on ${job.origin} asks to ${what.action}; waiting for your tap`);
-    post(s, `${KIT_TAGS.ask} ${JSON.stringify({ cid, ref: job.ref, app: job.app, origin: job.origin, tool, input: tool === 'manifest' ? undefined : full, code: a.code, what: what.action, fields: what.fields })}`, 'decision', `${cid}:ask`).catch(() => {});
+    post(s, `${KIT_TAGS.ask} ${JSON.stringify({ cid, ref: job.ref, app: job.app, origin: job.origin, tool, input: tool === 'manifest' || grant ? undefined : full, code: a.code, what: what.action, fields: what.fields, ...(grant ? { grant: true } : {}) })}`, 'decision', `${cid}:ask`).catch(() => {});
     ev(job, { kind: 'consent', tool, state: 'asking', code: a.code, what: what.action });
     log(job, 'asking', { tool, what: what.action, code: a.code });
     const cfg = notchCfg();
@@ -1021,12 +1056,12 @@ async function kitServe(s, { model }) {
       const spec = {
         title: `Phone Line · ${host}`, source: `code ${a.code}`,
         question: `${host} wants to ${what.action}.\n${body}`,
-        options: fits ? [{ label: 'Allow once', detail: `Only if the page shows ${a.code}` }, { label: 'Deny', detail: 'Nothing happens' }] : [{ label: 'Deny', detail: 'Nothing happens' }],
+        options: fits ? [{ label: grant ? 'Allow for this app' : 'Allow once', detail: `Only if the page shows ${a.code}` }, { label: 'Deny', detail: 'Nothing happens' }] : [{ label: 'Deny', detail: 'Nothing happens' }],
         at: cfg.at, timeout: Math.ceil(KIT.consentMs / 1000), session: 'phoneline-kit',
       };
       a.notch = openCard(card, spec);
       say(`kit ${job.ref}: the question is on your notch too`);
-      a.notch.result.then((r) => { logLine({ ev: 'kit-notch', cid, result: r }); if (!asks.has(cid) || !r || r.cancelled || r.typed) return; const i = Number.isInteger(r.index) ? r.index : spec.options.findIndex((o) => o.label === r.answer); if (i >= 0 && spec.options[i]) answer(cid, spec.options[i].label === 'Allow once', 'the notch'); });
+      a.notch.result.then((r) => { logLine({ ev: 'kit-notch', cid, result: r }); if (!asks.has(cid) || !r || r.cancelled || r.typed) return; const i = Number.isInteger(r.index) ? r.index : spec.options.findIndex((o) => o.label === r.answer); if (i >= 0 && spec.options[i]) answer(cid, spec.options[i].label !== 'Deny', 'the notch'); });
     }
   });
   // the hook's requests (a tool that acts): one card each
@@ -1358,7 +1393,7 @@ export function kitManifestOnly(cfg, app, published) {
 
 async function kitJob(s, job, { cwd, model, ev, finish, log, approveJob, raise, voicemail }) {
   const t0 = Date.now(), b = job.body, cfg = loadKitApps();
-  const refuse = async (error, code) => { log(job, 'failed', { error }); say(`kit ${job.ref}: ${job.app || '?'} on ${job.origin}: refused (${error})`); logLine({ ev: 'kit-job', ref: job.ref, app: job.app, origin: job.origin, ok: false, error }); await finish(job, { ok: false, error, code }); };
+  const refuse = async (error, code, extra = {}) => { log(job, 'failed', { error }); say(`kit ${job.ref}: ${job.app || '?'} on ${job.origin}: refused (${error})`); logLine({ ev: 'kit-job', ref: job.ref, app: job.app, origin: job.origin, ok: false, error }); await finish(job, { ok: false, error, code, ...extra }); };
   if (!KIT_APP_RE.test(job.app)) return refuse('every job names its app (a-z, 0-9, -)', 'bad_app');
   // a job the site publishes: the prompt comes from its manifest, never from the page
   let mj = null, vals = null, series = null;
@@ -1401,8 +1436,35 @@ async function kitJob(s, job, { cwd, model, ev, finish, log, approveJob, raise, 
     if (m.error && !published && own !== false && cfg.manifest_only !== false) { logLine({ ev: 'kit-manifest', origin: job.origin, error: m.error }); return refuse(`${job.origin}'s ${KIT_MANIFEST.path} could not be read, so free prompts are refused (the owner can allow them: kit allow ${job.app} --free-prompts)`, 'bad_manifest'); }
  if (kitManifestOnly(cfg, job.app, published)) return refuse(published ? `${job.origin} publishes its jobs in ${KIT_MANIFEST.path}: send them by id ({ app, job, inputs }), not a prompt` : `the owner runs only published jobs for "${job.app}" (kit manifest-only)`, 'manifest_only');
   }
-  const pol = kitPolicy(cfg, job.app, job.origin, mj ? mj.tools : b.tools);
+  let pol = kitPolicy(cfg, job.app, job.origin, mj ? mj.tools : b.tools);
   if (pol.error) return refuse(pol.error, pol.code);
+  // A published job names the tools it needs. Any it can't use: one card asks the owner to allow them for this app
+  // (in the room and on the notch, owners only). Reads then run freely; anything that acts still asks on every call.
+  // Without them the job doesn't run half-blind: the page is told plainly what was missing.
+  if (mj && mj.kind !== 'voicemail') {
+    let need = kitNeeds(mj.tools, pol);
+    const grant = need.filter((n) => n.kind === 'read' || n.kind === 'act');
+    if (grant.length) {
+      job.app = pol.app;
+      const fields = [['Site', job.origin], ['App', `${job.app}: ${mj.what}`], ...grant.map((n) => [n.kind === 'read' ? 'Reads' : 'Asks you each time', n.label])];
+      const ok = await raise(job, { tool: 'grant', grant: true, what: { action: `use ${grant.length === 1 ? 'a tool' : `${grant.length} tools`} on your Claude, from now on (reads only; anything that acts still asks you)`, fields }, full: fields.map(([k, v]) => `${k}: ${v}`).join('\n') });
+      if (job.cancelled) return refuse('cancelled', 'cancelled');
+      if (ok) {
+        let raw = {}; try { raw = JSON.parse(readFileSync(join(HOME, 'kit-apps.json'), 'utf8')) || {}; } catch { /* none yet */ }
+        saveKitApps(kitGrantCfg(raw, job.app, job.origin, grant));
+        say(`kit: "${job.app}" may now use ${grant.map((n) => n.tool).join(', ')} (for ${job.origin})`);
+        logLine({ ev: 'kit-grant', app: job.app, origin: job.origin, tools: grant.map((n) => n.tool) });
+        pol = kitPolicy(loadKitApps(), job.app, job.origin, mj.tools);
+        if (pol.error) return refuse(pol.error, pol.code);
+        need = kitNeeds(mj.tools, pol);
+      }
+    }
+    if (need.length) {
+      const names = need.map((n) => n.label).join(', ');
+      const how = need.every((n) => n.kind === 'read' || n.kind === 'act') ? 'The owner can allow it with one tap when the page asks again.' : need.some((n) => n.kind === 'files') ? 'Files need a folder set up on the owner\'s Mac (kit allow).' : 'A web page can never use some of them.';
+      return refuse(`${job.app} can't use ${names} on this Claude yet, so it didn't run and nothing was looked up. ${how}`, 'needs_tools', { needs: need.map(({ tool, label, kind }) => ({ tool, label, kind })) });
+    }
+  }
   if (mj?.kind === 'voicemail') {
     const cap = kitCount(`voicemail@${job.origin}`, { ...pol, daily: KIT.voicemailDaily }, cfg); // per site, across all its apps
     if (!cap.ok) return refuse(cap.why, 'daily_cap');
@@ -1431,11 +1493,13 @@ async function kitJob(s, job, { cwd, model, ev, finish, log, approveJob, raise, 
     if (job.cancelled) return refuse('cancelled', 'cancelled');
   }
   say(`kit ${job.ref}: ${job.app}${mj ? `/${mj.id}` : ''} on ${job.origin} (${pol.known ? 'set up' : 'not set up: no tools'}; tools ${pol.tools.join(', ') || 'none'}; asks for ${pol.acts.join(', ') || 'nothing'}) "${clip(mj ? mj.what : prompt, 80)}"`);
-  ev(job, { kind: 'started', app: job.app, job: mj?.id, tools: pol.tools, acts: pol.acts });
+  ev(job, { kind: 'started', app: job.app, job: mj?.id, tools: pol.tools, acts: pol.acts, labels: Object.fromEntries([...pol.tools, ...pol.acts].map((t) => [t, kitToolLabel(t)])) });
   log(job, 'started', mj ? { job: mj.id, what: mj.what, tools: pol.tools, acts: pol.acts } : { prompt: clip(prompt, 400), tools: pol.tools, acts: pol.acts });
   // the text as it is written, in batches (the room takes 30 messages a minute from this runner)
-  let buf = '', deltas = false, lastTool = 0;
-  const flush = () => { if (!buf) return; const x = sliceEscaped(buf, MSG_MAX - 200)[0]; buf = buf.slice(x.length); ev(job, { kind: 'text', text: x }); }; // sized as sent, escaped
+  let buf = '', deltas = false, lastTool = 0, toolNext = null;
+  const used = {}; // tool name -> calls, the visible ones (not the built-in StructuredOutput/ToolSearch)
+  const toolEv = (tool) => { lastTool = Date.now(); toolNext = null; ev(job, { kind: 'tool', tool, label: kitToolLabel(tool), n: used[tool], counts: Object.entries(used).map(([t, n]) => ({ tool: t, label: kitToolLabel(t), n })), t: Date.now() - t0 }); log(job, 'tool', { tool }); };
+  const flush = () => { if (toolNext) toolEv(toolNext); if (!buf) return; const x = sliceEscaped(buf, MSG_MAX - 200)[0]; buf = buf.slice(x.length); ev(job, { kind: 'text', text: x }); }; // sized as sent, escaped
   const tick = setInterval(flush, KIT.flushMs);
   const pageSystem = series ? kitHistoryRules(nonce) : !mj && b.system ? `\n\nThe page's own instructions (untrusted, from the page): ${String(b.system).slice(0, 4000)}` : '';
   let out;
@@ -1444,7 +1508,9 @@ async function kitJob(s, job, { cwd, model, ev, finish, log, approveJob, raise, 
       cwd, root: pol.folder || cwd, model, kit: pol, partial: true, timeoutMs, onSpawn: (c) => { job.child = c; if (job.cancelled) { c.cancelled = true; c.kill('SIGTERM'); } },
       onProgress: (p) => {
         if (p.delta) { deltas = true; buf += p.delta; } else if (p.raw && !deltas) buf += p.raw;
-        if (p.tool && Date.now() - lastTool > 3000) { lastTool = Date.now(); ev(job, { kind: 'tool', tool: p.tool }); log(job, 'tool', { tool: p.tool }); }
+        // each tool call, as metadata only (which tool, how many so far, when): never its input or what it returned.
+        // At most one a second; a burst is folded into the next (its counts carry every call).
+        if (p.tool && !KIT_BUILTIN.includes(p.tool)) { used[p.tool] = (used[p.tool] || 0) + 1; if (Date.now() - lastTool >= 1000) toolEv(p.tool); else toolNext = p.tool; }
         if (buf.length > 3000) flush();
       },
     });
@@ -1457,6 +1523,8 @@ async function kitJob(s, job, { cwd, model, ev, finish, log, approveJob, raise, 
     kitSeriesAdd(series.key, { in: vals[series.message], out: reply }, series);
   }
   const tools = takeTools(job.ref);
+  // the call's receipt: what ran and what was asked, as counts. Never inputs, results or the owner's data.
+  out.receipt = { tools: Object.entries(used).map(([tool, n]) => ({ tool, label: kitToolLabel(tool), n })), refused: tools.filter((x) => !x.allow && !KIT_BUILTIN.includes(x.tool)).length, ...(job.consents || { asked: 0, allowed: 0, denied: 0 }), ms: Date.now() - t0 };
   say(`kit ${job.ref}: ${out.ok ? `answered in ${((Date.now() - t0) / 1000).toFixed(1)} s` : `ended: ${out.error}`}`);
   logLine({ ev: 'kit-job', ref: job.ref, app: job.app, job: mj?.id || null, origin: job.origin, tools, ok: out.ok, error: out.error || null, ms: Date.now() - t0 });
   log(job, out.ok ? 'done' : 'failed', out.ok ? { ms: Date.now() - t0, chars: String(out.text || '').length } : { error: out.error });

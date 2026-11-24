@@ -199,23 +199,25 @@ async function uninstall() {
   say(`✓ The runner is stopped${argv.includes('--forget') ? ' and this Mac\'s room login is deleted (the room stays; its owner can remove this runner from it)' : ''}.`);
 }
 
-// dial <number> <pin> [--yes]: connect a web page that shows "Call this page: 482 913 7720 · PIN K7Q2" to this Mac's
-// Claude. Without --yes it only says which page that is, for the person to OK. Uses this Mac's runner login.
+// dial <number> [--yes]: call a web page that shows "Call this page: 482 913 7720" from this Mac's Claude. Without
+// --yes it only says which page that is, for the person to OK. With --yes it rings and prints a 4-digit code for the
+// person to type on that page: only that code, typed in their browser, connects it. Uses this Mac's runner login.
 async function dial() {
   const pair = readPair(); if (!pair) fail('no room on this Mac yet. Run: setup');
-  const pos = argv.filter((a, i) => !a.startsWith('--') && !(i > 0 && argv[i - 1] === '--pin'));
-  const pin = opt('pin') ?? pos.at(-1);
-  const number = pos.length > 1 ? pos.slice(0, -1).join(' ') : pos[0];
-  if (!number || !pin || pos.length < 2 && !opt('pin')) fail('usage: dial <number> <pin> [--yes]   e.g. dial 482 913 7720 K7Q2');
+  const number = argv.filter((a) => !a.startsWith('--')).join(' ');
+  if (!/^\D*([2-9]\d{2})\D*(\d{3})\D*(\d{4})\D*$/.test(number)) fail('usage: dial <number> [--yes]   e.g. dial 482 913 7720');
   const relay = (pair.relay || RELAY).replace(/\/+$/, '');
-  const r = await fetch(`${relay}/r/${pair.room}/dial`, { method: 'POST', headers: { authorization: `Bearer ${pair.token}`, 'content-type': 'application/json' }, body: JSON.stringify({ number, pin, connect: argv.includes('--yes') }) })
+  const r = await fetch(`${relay}/r/${pair.room}/dial`, { method: 'POST', headers: { authorization: `Bearer ${pair.token}`, 'content-type': 'application/json' }, body: JSON.stringify({ number, connect: argv.includes('--yes') }) })
     .then(async (x) => ({ status: x.status, data: await x.json().catch(() => ({})) }), () => ({ status: 0, data: { message: `could not reach ${relay}` } }));
   if (r.status !== 200) fail(String(r.data.message || `the relay said ${r.status}`).replace(/^\w+: /, ''));
   const p = r.data.page, host = new URL(p.origin).host;
-  if (!r.data.connected) {
+  if (!r.data.code) {
     say(`${r.data.number} is ${p.name} at ${p.origin}${p.app ? ` (app "${p.app}")` : ''}. Its number runs out in ${Math.ceil(p.expires_in_s / 60)} min.`);
-    say(`Ask: "Connect ${p.name} (${host}) to your Claude?" Then, only on a yes: dial ${number} ${pin} --yes`);
-  } else say(`✓ Connected: ${p.name} (${host}) runs on your Claude now, with only the tools its app has. Anything that acts still asks you. Hang it up from your room: ${relay}/r/${pair.room}`);
+    say(`Ask: "Connect ${p.name} (${host}) to your Claude?" Then, only on a yes: dial ${r.data.number} --yes`);
+  } else {
+    say(`Type ${r.data.code} on the page at ${host}. It works once, for ${Math.max(1, Math.round(r.data.code_expires_in_s / 60))} min. Only type it there.`);
+    say(`Once typed, ${p.name} runs on your Claude with only the tools its app has; anything that acts still asks you. Hang it up from your room: ${relay}/r/${pair.room}`);
+  }
   if (r.data.runner_online === false) say('! The runner on this Mac is not online, so the page can\'t run anything yet. Check it with: phoneline status (setup starts it again).');
 }
 
