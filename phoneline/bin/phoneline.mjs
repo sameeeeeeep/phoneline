@@ -216,6 +216,7 @@ async function dial() {
     say(`${r.data.number} is ${p.name} at ${p.origin}${p.app ? ` (app "${p.app}")` : ''}. Its number runs out in ${Math.ceil(p.expires_in_s / 60)} min.`);
     say(`Ask: "Connect ${p.name} (${host}) to your Claude?" Then, only on a yes: dial ${number} ${pin} --yes`);
   } else say(`✓ Connected: ${p.name} (${host}) runs on your Claude now, with only the tools its app has. Anything that acts still asks you. Hang it up from your room: ${relay}/r/${pair.room}`);
+  if (r.data.runner_online === false) say('! The runner on this Mac is not online, so the page can\'t run anything yet. Check it with: phoneline status (setup starts it again).');
 }
 
 const cmd = process.argv[2] || 'setup';

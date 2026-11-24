@@ -22,6 +22,7 @@
 //   node byo-runner.mjs kit allow <app> --origin <site> [--tool t] [--act t] [--folder <project>] [--approve-jobs]   what one app may use
 //   node byo-runner.mjs kit allow <app> --manifest-only | --free-prompts   published jobs only, or free prompts too
 //   node byo-runner.mjs kit manifest-only on|off|default    kit pins    kit unpin <origin>
+//   node byo-runner.mjs kit show-job <origin> <app>/<job>    kit pin-job <origin> <app>/<job> <version>   read a long job in full, then allow that version
 //
 // What a request may do is decided HERE, on your machine, not by Coco:
 //   - Only tools on the read-only list run, by exact name: read-only-tools.json next to this file (shipped, reviewed)
@@ -52,7 +53,6 @@ export const VERSION = '1';
 export const TAGS = { who: 'COCO-WHO v1', pair: 'COCO-PAIR v1', task: 'COCO-TASK v1', result: 'COCO-RESULT v1', hello: 'COCO-HELLO v1', pull: 'COCO-PULL v1', ask: 'COCO-ASK v1', answer: 'COCO-ANSWER v1', do: 'COCO-DO v1', done: 'COCO-DONE v1' };
 const UA = `coco-runner/${VERSION}`;
 const MAX_TEXT = 3800;
-const PART = 3300;
 
 // ---- the gate: which tools a request may use (pure, tested) -----------------------------------------------------
 const FILE_TOOLS = new Set(['Read', 'Grep', 'Glob', 'LS']);
@@ -159,11 +159,26 @@ export function parsePairing(text) {
   return invite && room && relay ? { relay: relay.replace(/[.,]$/, ''), room, invite, workspace } : null;
 }
 
-// a long JSON body in parts that each fit one room message
+// a long JSON body in parts that each fit one room message. A part is measured as it is sent, escaped inside the
+// wrapper's JSON (a " or \\ takes 2 characters, a control character or half a surrogate pair up to 6), so a dense answer
+// never comes out over the relay's 4,000 characters
+export const MSG_MAX = 3900;
+export function sliceEscaped(body, room) {
+  if (!(room >= 6)) throw new Error('no room in a message for the body');
+  const out = []; let i = 0;
+  do {
+    let j = i, cost = 0;
+    while (j < body.length) { const c = body.charCodeAt(j), k = c === 34 || c === 92 ? 2 : c < 32 || (c >= 0xd800 && c <= 0xdfff) ? 6 : 1; if (cost + k > room) break; cost += k; j++; }
+    out.push(body.slice(i, j)); i = j;
+  } while (i < body.length);
+  return out;
+}
 export function split(tag, ref, obj, extra = {}) {
   const body = JSON.stringify(obj);
-  const parts = Math.max(1, Math.ceil(body.length / PART));
-  return Array.from({ length: parts }, (_, i) => `${tag} ${JSON.stringify({ ref, ...extra, part: i + 1, parts, body: body.slice(i * PART, (i + 1) * PART) })}`);
+  const room = MSG_MAX - `${tag} ${JSON.stringify({ ref, ...extra, part: 9999, parts: 9999, body: '' })}`.length;
+  if (room < 1000) throw new Error('the message header is too long (its ref or extras)'); // a ref from outside can't leave no room
+  const slices = sliceEscaped(body, room);
+  return slices.map((b, i) => `${tag} ${JSON.stringify({ ref, ...extra, part: i + 1, parts: slices.length, body: b })}`);
 }
 export function parseTyped(text) {
   const s = String(text || '').trim();
@@ -964,7 +979,12 @@ async function kitServe(s, { model }) {
   let running = null;
   const ev = (job, o) => post(s, `${KIT_TAGS.event} ${JSON.stringify({ ref: job.ref, ...o })}`, 'status', `${job.ref}:e:${++job.n}`, job.from).catch(() => {});
   const finish = async (job, out) => {
-    for (const [i, text] of split(KIT_TAGS.done, job.ref, out).entries()) await post(s, text, 'done', `${job.ref}:d:${i}`, job.from).catch(() => {});
+    // if a part can't be sent, the page still gets an answer: a short failure, so it doesn't wait out its timer
+    try { for (const [i, text] of split(KIT_TAGS.done, job.ref, out).entries()) await post(s, text, 'done', `${job.ref}:d:${i}`, job.from); }
+    catch (e) {
+      say(`kit ${job.ref}: the answer could not be sent to the page (${clip(e.message, 120)})`);
+      if (!e.revoked) try { await post(s, split(KIT_TAGS.done, job.ref, { ok: false, error: 'the answer could not be sent to the page', code: 'send_failed' })[0], 'done', `${job.ref}:d:x`, job.from); } catch { /* nothing more to send */ }
+    }
     done.add(`${job.from}:${job.ref}`); while (done.size > 500) done.delete(done.values().next().value);
   };
   // a public, quiet line in the room for each step of each job: the owner's room view shows one live card per job (never pushed)
@@ -990,7 +1010,7 @@ async function kitServe(s, { model }) {
     job.child?.extend?.(KIT.consentMs + 15_000); // waiting for the owner does not count against the job's time
     asks.set(cid, a);
     say(`kit ${job.ref}: ${job.app} on ${job.origin} asks to ${what.action}; waiting for your tap`);
-    post(s, `${KIT_TAGS.ask} ${JSON.stringify({ cid, ref: job.ref, app: job.app, origin: job.origin, tool, input: full, code: a.code, what: what.action, fields: what.fields })}`, 'decision', `${cid}:ask`).catch(() => {});
+    post(s, `${KIT_TAGS.ask} ${JSON.stringify({ cid, ref: job.ref, app: job.app, origin: job.origin, tool, input: tool === 'manifest' ? undefined : full, code: a.code, what: what.action, fields: what.fields })}`, 'decision', `${cid}:ask`).catch(() => {});
     ev(job, { kind: 'consent', tool, state: 'asking', code: a.code, what: what.action });
     log(job, 'asking', { tool, what: what.action, code: a.code });
     const cfg = notchCfg();
@@ -1196,7 +1216,19 @@ export function kitSeriesAdd(key, turn, lim) {
 // Fetch a site's manifest from its origin: https only (http only for localhost), no redirects, JSON, 64 KB at most.
 // -> { none: true } (the site publishes none), { error }, or { raw, sha, man }. Cached 10 minutes (errors 1).
 const MANIFESTS = new Map();
-const REJECTED = new Map(); // origin -> { sha, at }: the owner said no to this version; refuse it without asking again for an hour
+const REFETCHED = new Map(); // origin -> when its manifest was last read again for a job the cached copy didn't know
+// The manifest for one job: when the cached copy has no such job, or the inputs don't fit it, the site may have just
+// published the change, so it is read again, at most once a minute per site (a page can't make the runner fetch on
+// every job)
+export async function kitManifestFor(origin, app, id, inputs, opts = {}) {
+  const m = await kitManifest(origin, opts);
+  const j = m.man?.apps?.[app]?.jobs?.[String(id)];
+  let fits = !!j; if (j) { try { kitInputs(j, inputs); } catch { fits = false; } }
+  if (!m.man || fits || Date.now() - (REFETCHED.get(origin) || 0) <= 60_000) return m;
+  REFETCHED.set(origin, Date.now()); while (REFETCHED.size > 200) REFETCHED.delete(REFETCHED.keys().next().value);
+  return kitManifest(origin, { ...opts, fresh: true });
+}
+const REJECTED = new Map(); // origin|app/job -> { sha, at }: the owner said no to this version of the job; refuse it without asking again for an hour
 export async function kitManifest(origin, { fetchImpl = kitHttpsGet, fresh = false, resolve = lookup } = {}) {
   const hit = MANIFESTS.get(origin);
   if (hit && !fresh && Date.now() - hit.at < (hit.v.error ? Math.min(KIT_MANIFEST.errMs, KIT_MANIFEST.cacheMs) : KIT_MANIFEST.cacheMs)) return hit.v;
@@ -1278,18 +1310,25 @@ export function kitPinOf(sha, man) {
   }
   return { sha, at: new Date().toISOString(), site: man.site, jobs, templates, settings };
 }
-export function kitPinCheck(pin, sha, man) {
+// Pins are per job: a job the owner already has runs as pinned whatever else the site adds or changes. Only the job asked
+// for is checked: "same" runs; "added" (a job published after the site was pinned) and "changed" (a pinned job's template
+// or settings differ) ring the owner for that one job; other jobs keep their own pins until they are used.
+export function kitPinCheck(pin, sha, man, key) {
   if (!pin) return { state: 'new' };
-  if (pin.sha === sha) return { state: 'same' };
   const now = kitPinOf(sha, man);
-  const changed = Object.keys(now.jobs).filter((k) => pin.jobs?.[k] && pin.jobs[k] !== now.jobs[k]);
-  const added = Object.keys(now.jobs).filter((k) => !pin.jobs?.[k]);
-  const removed = Object.keys(pin.jobs || {}).filter((k) => !now.jobs[k]);
-  // every setting that changed, not only the template: tools, what, schema, inputs, series, timeout
-  const sets = (k) => { const a = pin.settings?.[k] || {}, b = now.settings[k] || {}; return [...new Set([...Object.keys(a), ...Object.keys(b)])].filter((f) => JSON.stringify(a[f]) !== JSON.stringify(b[f])).map((f) => `  ${f}: ${JSON.stringify(a[f] ?? null)} -> ${JSON.stringify(b[f] ?? null)}`); };
-  const one = (k) => { const t = pin.templates?.[k] === now.templates[k] ? [] : [kitLineDiff(pin.templates?.[k] || '', now.templates[k])]; return `${k}:\n${[...sets(k), ...t].join('\n') || '  (no visible change)'}`; };
-  const diff = [...changed.map(one), ...added.map((k) => `${k} (new):\n${now.templates[k].split('\n').map((l) => `+ ${l}`).join('\n')}`), ...removed.map((k) => `${k}: removed`)].join('\n\n');
-  return { state: 'changed', changed, added, removed, diff: diff || '(only names or settings changed)', pin: now };
+  if (!now.jobs[key]) return { state: 'missing' };
+  const next = { ...pin, jobs: { ...pin.jobs, [key]: now.jobs[key] }, templates: { ...pin.templates, [key]: now.templates[key] }, settings: { ...pin.settings, [key]: now.settings[key] } };
+  // the whole-manifest hash moves on only once every pinned job matches it
+  if (Object.keys(now.jobs).every((k) => next.jobs[k] === now.jobs[k]) && Object.keys(next.jobs).every((k) => now.jobs[k] === next.jobs[k])) { next.sha = sha; next.at = now.at; }
+  if (pin.jobs?.[key] === now.jobs[key]) return { state: 'same', pin: next };
+  const sets = (a, b) => [...new Set([...Object.keys(a), ...Object.keys(b)])].filter((f) => JSON.stringify(a[f]) !== JSON.stringify(b[f])).map((f) => `  ${f}: ${JSON.stringify(a[f] ?? null)} -> ${JSON.stringify(b[f] ?? null)}`);
+  if (!pin.jobs?.[key]) {
+    // a new job: what the site says it does, its settings, and its template (in full when it fits on the card)
+    const st = Object.entries(now.settings[key] || {}).map(([f, v]) => `  ${f}: ${JSON.stringify(v)}`).join('\n');
+    return { state: 'added', key, diff: `${key} (new):\n${st}\ntemplate:\n${now.templates[key].split('\n').map((l) => `+ ${l}`).join('\n')}`, pin: next, sha: now.jobs[key] };
+  }
+  const t = pin.templates?.[key] === now.templates[key] ? [] : [kitLineDiff(pin.templates?.[key] || '', now.templates[key])];
+  return { state: 'changed', key, diff: `${key}:\n${[...sets(pin.settings?.[key] || {}, now.settings[key] || {}), ...t].join('\n') || '  (no visible change)'}`, pin: next, sha: now.jobs[key] };
 }
 // Pure: a line diff ("- " removed, "+ " added, "  " kept), by longest common subsequence
 export function kitLineDiff(a, b) {
@@ -1324,24 +1363,26 @@ async function kitJob(s, job, { cwd, model, ev, finish, log, approveJob, raise, 
   // a job the site publishes: the prompt comes from its manifest, never from the page
   let mj = null, vals = null, series = null;
   if (b.job != null) {
-    const m = await kitManifest(job.origin);
+    const m = await kitManifestFor(job.origin, job.app, b.job, b.inputs);
     if (m.none) return refuse(`${job.origin} publishes no ${KIT_MANIFEST.path}, so a job id means nothing; send a prompt`, 'no_manifest');
     if (m.error) { logLine({ ev: 'kit-manifest', origin: job.origin, error: m.error }); say(`kit: ${job.origin}'s manifest: ${m.error}`); return refuse(`${job.origin}'s ${KIT_MANIFEST.path} could not be read or is not valid`, 'bad_manifest'); }
     mj = m.man.apps[job.app]?.jobs?.[String(b.job)] || null;
     if (!mj) return refuse(`${job.origin} publishes no job "${clip(b.job, 40)}" for "${job.app}"`, 'unknown_job');
     try { vals = kitInputs(mj, b.inputs); } catch (e) { return refuse(e.message, 'bad_inputs'); }
     // the pin: first use records the manifest's hash; a changed manifest waits for the owner's tap, with what changed
-    const pc = kitPinCheck(cfg.pins[job.origin], m.sha, m.man);
+    const pc = kitPinCheck(cfg.pins[job.origin], m.sha, m.man, `${job.app}/${mj.id}`);
     if (pc.state === 'new') { savePin(job.origin, kitPinOf(m.sha, m.man)); log(job, 'pinned', { sha: m.sha.slice(0, 12), apps: Object.keys(m.man.apps).length, jobs: Object.keys(kitPinOf(m.sha, m.man).jobs).length }); say(`kit: pinned ${job.origin}'s manifest (${m.sha.slice(0, 12)})`); }
-    if (pc.state === 'changed') {
-      const no = REJECTED.get(job.origin);
-      if (no && no.sha === m.sha && Date.now() - no.at < 3_600_000) return refuse(`${job.origin} changed its ${KIT_MANIFEST.path} and the owner did not allow the new version`, 'manifest_changed');
-      if (pc.diff.length > KIT_SHOW.room) { REJECTED.set(job.origin, { sha: m.sha, at: Date.now() }); return refuse(`${job.origin} changed its ${KIT_MANIFEST.path} by more than the owner can see on one card, so it is refused (the owner can review it and run kit unpin ${job.origin})`, 'manifest_changed'); }
-      const what = [pc.changed.length && `${pc.changed.length} changed (${pc.changed.join(', ')})`, pc.added.length && `${pc.added.length} new (${pc.added.join(', ')})`, pc.removed.length && `${pc.removed.length} removed`].filter(Boolean).join('; ') || 'its settings changed';
-      log(job, 'waiting', { manifest: 'changed', what });
-      const ok = await raise(job, { tool: 'manifest', what: { action: `change the code it runs on your Claude: ${what}`, fields: [['Site', job.origin], ['Jobs', what], ['What changed', pc.diff]] }, full: pc.diff });
-      if (!ok) REJECTED.set(job.origin, { sha: m.sha, at: Date.now() });
-      if (!ok) return refuse(`${job.origin} changed its ${KIT_MANIFEST.path} and the owner did not allow the new version`, 'manifest_changed');
+    else if (pc.state === 'same') { if (pc.pin.sha !== cfg.pins[job.origin].sha) savePin(job.origin, pc.pin); }
+    else if (pc.state === 'added' || pc.state === 'changed') {
+      const rk = `${job.origin}|${pc.key}`, no = REJECTED.get(rk), added = pc.state === 'added';
+      if (no && no.sha === pc.sha && Date.now() - no.at < 3_600_000) return refuse(`${job.origin} ${added ? 'added' : 'changed'} ${pc.key} in its ${KIT_MANIFEST.path} and the owner did not allow it`, 'manifest_changed');
+      // the owner can't allow what they can't see: a job too long for one card is refused, never shortened. The owner can
+      // read all of it and allow it on this Mac: kit show-job, then kit pin-job with the version it printed
+      if (pc.diff.length > KIT_SHOW.room) { REJECTED.set(rk, { sha: pc.sha, at: Date.now() }); return refuse(`${job.origin} ${added ? 'added' : 'changed'} ${pc.key} in its ${KIT_MANIFEST.path}, and it is too long to show the owner on one card, so it is refused (the owner can read all of it and allow it: kit show-job ${job.origin} ${pc.key})`, 'manifest_changed'); }
+      const what = added ? `a new job, ${pc.key}: ${mj.what}` : `1 changed (${pc.key})`;
+      log(job, 'waiting', { manifest: pc.state, what });
+      const ok = await raise(job, { tool: 'manifest', what: { action: added ? `add code it runs on your Claude: ${what}` : `change the code it runs on your Claude: ${what}`, fields: [['Site', job.origin], ['Job', what], [added ? 'The new job' : 'What changed', pc.diff]] }, full: pc.diff });
+      if (!ok) { REJECTED.set(rk, { sha: pc.sha, at: Date.now() }); return refuse(`${job.origin} ${added ? 'added' : 'changed'} ${pc.key} in its ${KIT_MANIFEST.path} and the owner did not allow it`, 'manifest_changed'); }
       savePin(job.origin, pc.pin);
       if (job.cancelled) return refuse('cancelled', 'cancelled');
     }
@@ -1394,7 +1435,7 @@ async function kitJob(s, job, { cwd, model, ev, finish, log, approveJob, raise, 
   log(job, 'started', mj ? { job: mj.id, what: mj.what, tools: pol.tools, acts: pol.acts } : { prompt: clip(prompt, 400), tools: pol.tools, acts: pol.acts });
   // the text as it is written, in batches (the room takes 30 messages a minute from this runner)
   let buf = '', deltas = false, lastTool = 0;
-  const flush = () => { if (!buf) return; const x = buf.slice(0, 3000); buf = buf.slice(3000); ev(job, { kind: 'text', text: x }); };
+  const flush = () => { if (!buf) return; const x = sliceEscaped(buf, MSG_MAX - 200)[0]; buf = buf.slice(x.length); ev(job, { kind: 'text', text: x }); }; // sized as sent, escaped
   const tick = setInterval(flush, KIT.flushMs);
   const pageSystem = series ? kitHistoryRules(nonce) : !mj && b.system ? `\n\nThe page's own instructions (untrusted, from the page): ${String(b.system).slice(0, 4000)}` : '';
   let out;
@@ -1483,6 +1524,29 @@ async function kitMain(argv) {
     if (!Object.keys(pins).length) { console.log('No sites pinned yet: a site is pinned the first time one of its published jobs runs.'); return; }
     for (const [o, p] of Object.entries(pins)) console.log(`${o}  ${String(p.sha).slice(0, 16)}  ${Object.keys(p.jobs || {}).length} jobs (${Object.keys(p.jobs || {}).join(', ')})  since ${p.at}`);
     return;
+  }
+  if (argv[0] === 'show-job' || argv[0] === 'pin-job') {
+    // Read a site's published job in full, then allow exactly that version (the version printed must still be the one
+    // the site serves), for a job too long to show on a phone card
+    const [, origin, key, ver] = argv;
+    if (!origin || !/^[a-z0-9-]+\/[A-Za-z0-9_-]+$/.test(key || '')) throw new Error(`kit ${argv[0]} <origin> <app>/<job>${argv[0] === 'pin-job' ? ' <version>' : ''}`);
+    const m = await kitManifest(origin, { fresh: true });
+    if (m.none || m.error) throw new Error(`${origin}'s ${KIT_MANIFEST.path}: ${m.error || 'none published'}`);
+    const now = kitPinOf(m.sha, m.man);
+    if (!now.jobs[key]) throw new Error(`${origin} publishes no job ${key}`);
+    const v = now.jobs[key]; // the job's whole sha256: pin-job takes only this exact version
+    // a site's text is printed with its control characters shown, never run by the terminal (newlines and tabs stay)
+    const shown = (x) => String(x).replace(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f\u2028\u2029\u202a-\u202e\u2066-\u2069]/g, (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`);
+    if (argv[0] === 'show-job') {
+      console.log(`${shown(origin)} ${key}, version ${v}\n\nsettings:\n${Object.entries(now.settings[key]).map(([f, x]) => `  ${f}: ${shown(JSON.stringify(x))}`).join('\n')}\n\ntemplate:\n${shown(now.templates[key])}\n\nTo allow exactly this version: kit pin-job ${shown(origin)} ${key} ${v}`);
+      return;
+    }
+    if (ver !== v) throw new Error(`the site now serves version ${v} of ${key}, not ${ver || '(none given)'}: read it again with kit show-job ${origin} ${key}`);
+    const cfgp = loadKitApps().pins[origin];
+    const pc = kitPinCheck(cfgp, m.sha, m.man, key);
+    // a site with no pin yet gets a pin holding only the job the owner read: its other jobs ring when first used
+    savePin(origin, pc.state === 'new' ? { ...now, sha: null, jobs: { [key]: now.jobs[key] }, templates: { [key]: now.templates[key] }, settings: { [key]: now.settings[key] } } : pc.pin);
+    say(`pinned ${key} on ${origin} at version ${v}`); return;
   }
   if (argv[0] === 'unpin') {
     let raw = {}; try { raw = JSON.parse(readFileSync(join(HOME, 'kit-apps.json'), 'utf8')) || {}; } catch { /* none */ }
