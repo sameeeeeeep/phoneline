@@ -6,10 +6,12 @@ allowed-tools: Bash(node:*)
 Run this and wait for it to finish (up to about three minutes: it waits for the person to claim their room):
 
 ```
-node "${CLAUDE_PLUGIN_ROOT}/bin/phoneline.mjs" setup
+node "${CLAUDE_PLUGIN_ROOT}/bin/phoneline.mjs" setup "$ARGUMENTS"
 ```
 
-Then tell the user, briefly:
+If a link was given (`/phoneline:setup https://…/j/…#k=…`), this Mac joins that line as the Claude that runs its apps; there is no claim step. Tell the user whether it connected (the ✓ / ! / ✗ lines) and that their line's page now shows it. Never repeat the link.
+
+Without a link, tell the user, briefly:
 - Whether the runner is up (the ✓ / ! lines).
 - That their browser opened the claim page. It shows a 6-digit code: claim the room only if it matches the code in the output. Quote the code.
 - Whether the room was claimed. If not, the link works for an hour, and `/phoneline:status` shows it again.

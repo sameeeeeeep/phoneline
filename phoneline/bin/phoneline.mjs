@@ -2,6 +2,9 @@
 // phoneline.mjs: set up Phone Line on this Mac in one go, so web pages can run on your own Claude.
 //
 //   node phoneline.mjs setup        make your room (or reuse it), start the runner as a login service, open the claim page
+//   node phoneline.mjs setup <link> run apps for a line you already have: <link> is its one-time Mac link
+//                                   (https://phoneline.dev/j/<line>#k=…, from "Your line is ready", the line's Contacts
+//                                   or your Claude's attach_mac). No claim step: the line has its owner.
 //   node phoneline.mjs claim        show the claim link again (until the room has an owner)
 //   node phoneline.mjs status       room, owner, runner, apps, last log lines
 //   node phoneline.mjs apps [allow <app> --origin <site> [--tool t] [--act t] [--approve-jobs] [--auto] | deny <app>]
@@ -24,7 +27,7 @@ import { homedir, hostname, platform } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-const RELAY = (process.env.PHONELINE_RELAY || 'https://phoneline.dev').replace(/\/+$/, '');
+let RELAY = (process.env.PHONELINE_RELAY || 'https://phoneline.dev').replace(/\/+$/, '');
 const DIR = process.env.PHONELINE_HOME || join(homedir(), '.phoneline');
 const RUNNER = join(DIR, 'runner.mjs');
 const PAIRING = join(DIR, 'kit-pairing.json');
@@ -115,8 +118,23 @@ function askNotch() {
   try { return readdirSync(join(homedir(), '.claude/plugins/cache/ask-notch/ask-notch')).length > 0; } catch { return false; }
 }
 
+// a line's one-time Mac link: https://<relay>/j/<room>#k=<secret>
+export function macLink(s) {
+  const m = /^(https?:\/\/[^/\s#?]+)\/j\/([a-z0-9][a-z0-9-]{2,39})#k=([A-Za-z0-9_-]{16,200})$/.exec(String(s || '').trim());
+  return m && relayOk(m[1]) && knownRelay(m[1]) ? { relay: m[1], room: m[2], secret: m[3] } : null;
+}
+// a Mac link may only point at Phone Line itself (or the relay this Mac is told to use, or one on this machine): a link
+// to anyone else's relay would have this Mac run that relay's jobs on its Claude
+export const KNOWN_RELAYS = ['https://phoneline.dev', 'https://phoneline-relay-dialcode-preview.sameep-fd6.workers.dev'];
+function knownRelay(u) {
+  const x = new URL(u);
+  return KNOWN_RELAYS.includes(x.origin) || x.origin === (process.env.PHONELINE_RELAY || '').replace(/\/+$/, '') || ['localhost', '127.0.0.1'].includes(x.hostname);
+}
+
 async function setup() {
   if (Number(process.versions.node.split('.')[0]) < 18) fail(`Node ${process.versions.node} is too old; Phone Line needs Node 18+.`);
+  const arg = argv.find((a) => !a.startsWith('--') && /\/j\//.test(a));
+  if (arg) return attach(arg);
   if (!relayOk(RELAY)) fail(`PHONELINE_RELAY must be https (or http://localhost): ${RELAY}`);
   const claude = findClaude();
   if (!claude) fail('Claude Code is not installed on this Mac (no `claude` found). Install it and sign in first.');
@@ -158,6 +176,35 @@ async function setup() {
   say(`  Your room: ${RELAY}/r/${pair.room}  (add it to your phone's Home Screen for notifications)`);
   say(`  A web page uses it with: new PhoneLine({ room: "${pair.room}" })`);
   say(askNotch() ? '  Ask Notch is installed: confirmations also show on your notch.' : '  Optional: install the Ask Notch plugin so confirmations also show on your notch.');
+}
+
+// setup <link>: this Mac runs apps for a line made elsewhere (Create my line in claude.ai). The link puts this Mac's
+// runner in that line, already approved; a Mac that ran another line moves to this one.
+async function attach(arg) {
+  const L = macLink(arg);
+  if (!L) fail('that is not a Phone Line Mac link (it looks like https://phoneline.dev/j/pl-…#k=…, on phoneline.dev). Copy it again from your line.');
+  RELAY = L.relay;
+  const claude = findClaude();
+  if (!claude) fail('Claude Code is not installed on this Mac (no `claude` found). Install it and sign in first.');
+  mkdirSync(DIR, { recursive: true, mode: 0o700 });
+  for (const f of ['runner.mjs', 'read-only-tools.json']) copyFileSync(join(HERE, f), join(DIR, f));
+  const old = readPair();
+  if (old && old.relay === RELAY && old.room === L.room && !(await owner(old)).revoked) say(`✓ This Mac already runs apps for ${L.room}`);
+  else {
+    const r = await api(`/j/${L.room}`, { method: 'POST', json: { secret: L.secret, name: opt('name') || `Claude Code on ${hostname().replace(/\.local$/, '')}` } }).catch(() => ({ status: 0, data: { message: `could not reach ${RELAY}` } }));
+    if (r.status !== 201 || !r.data?.token) fail(String(r.data?.message || `the line did not take this Mac (${r.status})`).replace(/^\w+: /, ''));
+    if (old) await fetch(`${old.relay}/r/${old.room}/serve`, { method: 'POST', headers: { authorization: `Bearer ${old.token}`, 'content-type': 'application/json' }, body: JSON.stringify({ on: false }) }).catch(() => null);
+    writeFileSync(PAIRING, JSON.stringify({ relay: RELAY, room: L.room, token: r.data.token, me: r.data.member?.id || null }), { mode: 0o600 }); chmodSync(PAIRING, 0o600);
+    rmSync(CLAIM, { force: true });
+    say(`✓ This Mac now runs apps for your line ${L.room}, as ${r.data.member?.name || 'its runner'}${old && old.room !== L.room ? ` (it ran ${old.room} before; that line no longer has this Mac)` : ''}`);
+  }
+  if (service()) {
+    writeFileSync(LOG, '');
+    startService(claude);
+    say((await waitServing()) ? '✓ The runner is up: your apps run here, and anything that acts asks you first' : '! The runner started but is not serving yet; check: phoneline status');
+  } else say(`! No login service on this machine. Keep the runner running yourself:\n    COCO_RUNNER_HOME=${DIR} node ${RUNNER} kit`);
+  say('');
+  say(`  Your line: ${RELAY}/r/${L.room}`);
 }
 
 async function claim() {

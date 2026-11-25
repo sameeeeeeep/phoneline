@@ -875,17 +875,46 @@ export function kitNeeds(wanted, pol, allow = loadAllow()) {
   }
   return out;
 }
-// Pure: kit-apps.json after the owner allowed `grant` for `app` from `origin`. A new app is tied to that site; an app
-// already open to any site stays so. Reads join `tools` (web reads turn web on), the rest join `acts` (they still ask).
-export function kitGrantCfg(raw, app, origin, grant) {
+// Pure: which of a job's missing tools the owner may allow with one tap from a page. Two limits keep a tap narrow:
+//   - it only ever applies to the asking site: an app the owner set up on the Mac for any site, or for other sites
+//     too, can't be widened from one page (that changes what every site gets);
+//   - it never leaves an app able to read private data and reach the web: web reads (WebSearch, WebFetch) and
+//     connector reads or files on one app are a way out (read the inbox, then put it in a URL). Only the owner can
+//     set that up, on the Mac (kit allow <app> --web).
+// Anything else stays as kitNeeds said; an item that fails a limit becomes kind "mac", with why.
+export function kitGrantCheck(need, cfg, app, origin, allow = loadAllow()) {
+  const apps = cfg?.apps && typeof cfg.apps === 'object' ? cfg.apps : {};
+  const cur = Object.prototype.hasOwnProperty.call(apps, app) ? apps[app] : null;
+  const eff = { ...(cfg?.default || {}), ...(cur || {}) };
+  const origins = kitStrs(cur?.origins);
+  const mine = !cur || (origins.length === 1 && origins[0] === origin);
+  const isWeb = (t) => allow.web.has(t) || t === 'WebSearch' || t === 'WebFetch';
+  const isPrivate = (t) => t.startsWith('mcp__') && allow.mcp.has(t);
+  const grantable = need.filter((n) => n.kind === 'read' || n.kind === 'act');
+  const webNow = !!eff.web;
+  const privNow = !!eff.files || !!eff.folder || kitStrs(eff.tools).some(isPrivate);
+  const webAsked = grantable.some((n) => n.kind === 'read' && isWeb(n.tool));
+  const privAsked = grantable.some((n) => n.kind === 'read' && isPrivate(n.tool));
+  return need.map((n) => {
+    if (n.kind !== 'read' && n.kind !== 'act') return n;
+    if (!mine) return { ...n, kind: 'mac', why: origins.length ? `"${app}" is set up on the owner's Mac for ${origins.join(', ')}` : `"${app}" is set up on the owner's Mac for any site` };
+    if (n.kind === 'read' && isWeb(n.tool) && (privNow || privAsked)) return { ...n, kind: 'mac', why: `web access with private reads needs the owner's Mac (kit allow ${app} --web)` };
+    if (n.kind === 'read' && isPrivate(n.tool) && (webNow || webAsked)) return { ...n, kind: 'mac', why: `private reads with web access need the owner's Mac (kit allow ${app} --web)` };
+    return n;
+  });
+}
+// Pure: kit-apps.json after the owner allowed `grant` for `app` from `origin`. The app is tied to that site only.
+// Reads join `tools` (web reads turn web on), the rest join `acts` (they still ask). Checked again here against the
+// file as it is now (kitGrantCheck): anything a tap may not allow is left out.
+export function kitGrantCfg(raw, app, origin, grant, allow = loadAllow()) {
   const r = JSON.parse(JSON.stringify(raw || {}));
   r.apps = r.apps && typeof r.apps === 'object' ? r.apps : {};
+  const ok = kitGrantCheck(grant, { default: r.default || {}, apps: r.apps }, app, origin, allow).filter((n) => n.kind === 'read' || n.kind === 'act');
+  if (!ok.length) return r;
   const cur = Object.prototype.hasOwnProperty.call(r.apps, app) ? r.apps[app] : null;
-  const reads = grant.filter((n) => n.kind === 'read').map((n) => n.tool), acts = grant.filter((n) => n.kind === 'act').map((n) => n.tool);
-  const web = reads.some((t) => t === 'WebSearch' || t === 'WebFetch');
-  const origins = cur ? (kitStrs(cur.origins).length ? [...new Set([...kitStrs(cur.origins), origin])] : kitStrs(cur.origins)) : [origin];
-  r.apps[app] = { ...(cur || {}), tools: [...new Set([...kitStrs(cur?.tools), ...reads])], acts: [...new Set([...kitStrs(cur?.acts), ...acts])], ...(web || cur?.web ? { web: true } : {}), origins, granted: new Date().toISOString() };
-  if (!r.apps[app].origins.length) delete r.apps[app].origins;
+  const reads = ok.filter((n) => n.kind === 'read').map((n) => n.tool), acts = ok.filter((n) => n.kind === 'act').map((n) => n.tool);
+  const web = reads.some((t) => allow.web.has(t) || t === 'WebSearch' || t === 'WebFetch');
+  r.apps[app] = { ...(cur || {}), tools: [...new Set([...kitStrs(cur?.tools), ...reads])], acts: [...new Set([...kitStrs(cur?.acts), ...acts])], ...(web || cur?.web ? { web: true } : {}), origins: [origin], granted: new Date().toISOString() };
   return r;
 }
 // the most of a tool's input a consent card shows; an act whose input is longer is refused without asking, since the
@@ -1442,9 +1471,10 @@ async function kitJob(s, job, { cwd, model, ev, finish, log, approveJob, raise, 
   // (in the room and on the notch, owners only). Reads then run freely; anything that acts still asks on every call.
   // Without them the job doesn't run half-blind: the page is told plainly what was missing.
   if (mj && mj.kind !== 'voicemail') {
-    let need = kitNeeds(mj.tools, pol);
+    let need = kitGrantCheck(kitNeeds(mj.tools, pol), cfg, pol.app, job.origin);
     const grant = need.filter((n) => n.kind === 'read' || n.kind === 'act');
-    if (grant.length) {
+    // one card only when one tap would let the job run: if anything else is missing, nothing is asked or saved
+    if (grant.length && grant.length === need.length) {
       job.app = pol.app;
       const fields = [['Site', job.origin], ['App', `${job.app}: ${mj.what}`], ...grant.map((n) => [n.kind === 'read' ? 'Reads' : 'Asks you each time', n.label])];
       const ok = await raise(job, { tool: 'grant', grant: true, what: { action: `use ${grant.length === 1 ? 'a tool' : `${grant.length} tools`} on your Claude, from now on (reads only; anything that acts still asks you)`, fields }, full: fields.map(([k, v]) => `${k}: ${v}`).join('\n') });
@@ -1454,14 +1484,15 @@ async function kitJob(s, job, { cwd, model, ev, finish, log, approveJob, raise, 
         saveKitApps(kitGrantCfg(raw, job.app, job.origin, grant));
         say(`kit: "${job.app}" may now use ${grant.map((n) => n.tool).join(', ')} (for ${job.origin})`);
         logLine({ ev: 'kit-grant', app: job.app, origin: job.origin, tools: grant.map((n) => n.tool) });
-        pol = kitPolicy(loadKitApps(), job.app, job.origin, mj.tools);
+        const now = loadKitApps();
+        pol = kitPolicy(now, job.app, job.origin, mj.tools);
         if (pol.error) return refuse(pol.error, pol.code);
-        need = kitNeeds(mj.tools, pol);
+        need = kitGrantCheck(kitNeeds(mj.tools, pol), now, pol.app, job.origin);
       }
     }
     if (need.length) {
       const names = need.map((n) => n.label).join(', ');
-      const how = need.every((n) => n.kind === 'read' || n.kind === 'act') ? 'The owner can allow it with one tap when the page asks again.' : need.some((n) => n.kind === 'files') ? 'Files need a folder set up on the owner\'s Mac (kit allow).' : 'A web page can never use some of them.';
+      const how = need.some((n) => n.kind === 'never') ? 'A web page can never use some of them.' : need.some((n) => n.kind === 'files') ? 'Files need a folder set up on the owner\'s Mac (kit allow).' : need.some((n) => n.kind === 'mac') ? `The owner can set this up on their Mac: ${need.find((n) => n.kind === 'mac').why}.` : 'The owner can allow it with one tap when the page asks again.';
       return refuse(`${job.app} can't use ${names} on this Claude yet, so it didn't run and nothing was looked up. ${how}`, 'needs_tools', { needs: need.map(({ tool, label, kind }) => ({ tool, label, kind })) });
     }
   }
