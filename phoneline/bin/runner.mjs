@@ -897,7 +897,7 @@ export function kitGrantCheck(need, cfg, app, origin, allow = loadAllow()) {
   const privAsked = grantable.some((n) => n.kind === 'read' && isPrivate(n.tool));
   return need.map((n) => {
     if (n.kind !== 'read' && n.kind !== 'act') return n;
-    if (!mine) return { ...n, kind: 'mac', why: origins.length ? `"${app}" is set up on the owner's Mac for ${origins.join(', ')}` : `"${app}" is set up on the owner's Mac for any site` };
+    if (!mine) return { ...n, kind: 'mac', why: `"${app}" is already set up on the owner's Mac for other sites` }; // never name the owner's other sites to a page
     if (n.kind === 'read' && isWeb(n.tool) && (privNow || privAsked)) return { ...n, kind: 'mac', why: `web access with private reads needs the owner's Mac (kit allow ${app} --web)` };
     if (n.kind === 'read' && isPrivate(n.tool) && (webNow || webAsked)) return { ...n, kind: 'mac', why: `private reads with web access need the owner's Mac (kit allow ${app} --web)` };
     return n;
